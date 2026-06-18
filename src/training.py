@@ -3,18 +3,20 @@
 Training loop utilities for the genomic expression Transformer.
 
 Handles device resolution, train/validation DataLoader construction, and
-per-epoch MSE (train) / MAE (validation) metric computation.
+per-epoch MSE (train)/(validation) metric computation.
 """
 
 from __future__ import annotations
 
 import functools
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 from dataset import collate_expression_batch
+from target_normalization import TargetNormalizer
 
 
 def resolve_device(device_config: str) -> str:
@@ -34,8 +36,11 @@ def resolve_device(device_config: str) -> str:
 
 def build_dataloaders(
     dataset, config: dict, pad_id: int
-) -> tuple[DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader, TargetNormalizer]:
     """Split the dataset and build train/validation DataLoaders.
+
+    Fits target normalization on the training split only, then attaches the
+    normalizer to the shared dataset so validation uses train statistics.
 
     Args:
         dataset: Full ``ExpressionDataset`` instance.
@@ -43,7 +48,7 @@ def build_dataloaders(
         pad_id: Padding token ID passed to the collate function.
 
     Returns:
-        Tuple of (train_loader, val_loader).
+        Tuple of (train_loader, val_loader, fitted_target_normalizer).
 
     Raises:
         ValueError: If the dataset is too small for the requested split.
@@ -55,6 +60,14 @@ def build_dataloaders(
         raise ValueError("Dataset too small for split")
 
     train_ds, val_ds = random_split(dataset, [train_size, val_size])
+
+    train_raw = np.array(
+        [dataset.get_raw_target(i) for i in train_ds.indices], dtype=np.float64
+    )
+    normalizer = TargetNormalizer()
+    normalizer.fit(train_raw)
+    dataset.attach_target_normalizer(normalizer)
+
     collate_fn = functools.partial(collate_expression_batch, pad_id=pad_id)
 
     train_loader = DataLoader(
@@ -69,7 +82,7 @@ def build_dataloaders(
         shuffle=False,
         collate_fn=collate_fn,
     )
-    return train_loader, val_loader
+    return train_loader, val_loader, normalizer
 
 
 def run_training_epoch(
@@ -113,9 +126,11 @@ def run_training_epoch(
 
 
 def run_validation_epoch(
-    model: nn.Module, val_loader: DataLoader, device: str
+    model: nn.Module,
+    val_loader: DataLoader,
+    device: str,
 ) -> float:
-    """Run one validation epoch and return the mean absolute error (MAE).
+    """Run one validation epoch and return the mean squared error (MSE).
 
     Args:
         model: Expression Transformer model.
@@ -123,10 +138,10 @@ def run_validation_epoch(
         device: Target device string.
 
     Returns:
-        Mean absolute error in VST units across all validation samples.
+        Mean squared error in normalized space across all validation samples.
     """
     model.eval()
-    total_abs_error = 0.0
+    total_squared_error = 0.0
     num_samples = 0
 
     with torch.no_grad():
@@ -136,10 +151,11 @@ def run_validation_epoch(
             targets = targets.to(device)
 
             predictions = model(sequences, mask)
-            total_abs_error += torch.abs(predictions - targets).sum().item()
+            total_squared_error += torch.sum((predictions - targets) ** 2).item()
             num_samples += targets.numel()
 
-    return total_abs_error / num_samples
+    return total_squared_error / num_samples
+
 
 
 def train_model(
@@ -151,7 +167,7 @@ def train_model(
 ) -> None:
     """Train the model for the configured number of epochs.
 
-    Logs per-epoch training MSE and validation MAE to stdout.
+    Logs per-epoch training and validation MSE in normalized target space.
 
     Args:
         model: Expression Transformer model (already on device).
@@ -167,8 +183,8 @@ def train_model(
         train_mse = run_training_epoch(
             model, train_loader, optimizer, criterion, device
         )
-        val_mae = run_validation_epoch(model, val_loader, device)
+        val_mse = run_validation_epoch(model, val_loader, device)
         print(
             f"Epoch {epoch}/{config['epochs']} | "
-            f"Train MSE: {train_mse:.6f} | Val MAE: {val_mae:.6f}"
+            f"Train MSE (norm): {train_mse:.6f} | Val MSE (norm): {val_mse:.6f}"
         )

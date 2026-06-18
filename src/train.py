@@ -32,7 +32,7 @@ CONFIG = {
     # Training params
     "batch_size": 32,
     "lr": 1e-4,
-    "epochs": 50,
+    "epochs": 150,
     "val_split": 0.1,
     "device": "cuda",
 }
@@ -78,6 +78,11 @@ def parse_arguments() -> argparse.Namespace:
         default="training_logs.txt",
         help="Path to output training logs (default: training_logs.txt).",
     )
+    parser.add_argument(
+        "--normalizer-file",
+        default="target_normalizer.json",
+        help="Path to save fitted target normalizer for inference.",
+    )
     return parser.parse_args()
 
 
@@ -96,7 +101,7 @@ def main() -> None:
         vocabulary = build_vocabulary(sorted_tissues, CONFIG)
 
         dataset = ExpressionDataset(df, vocabulary, CONFIG, sorted_tissues)
-        train_loader, val_loader = build_dataloaders(
+        train_loader, val_loader, normalizer = build_dataloaders(
             dataset, CONFIG, vocabulary.pad_id
         )
 
@@ -104,7 +109,15 @@ def main() -> None:
             vocabulary.vocab_size, vocabulary.pad_id, CONFIG
         ).to(device)
 
+        print(
+            "Target normalizer (train split): "
+            f"min={normalizer.min_val:.6f}, max={normalizer.max_val:.6f}, "
+            f"mean={normalizer.mean:.6f}, std={normalizer.std:.6f}"
+        )
+
         train_model(model, train_loader, val_loader, CONFIG, device)
+        normalizer.save(args.normalizer_file)
+        print(f"Saved target normalizer: {args.normalizer_file}")
     finally:
         sys.stdout = original_stdout
         tee.close()

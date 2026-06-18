@@ -13,6 +13,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
+from target_normalization import TargetNormalizer
 from vocabulary import Vocabulary, encode_dna_sequence, encode_tissue
 
 
@@ -29,6 +30,7 @@ class ExpressionDataset(Dataset):
         vocabulary: Vocabulary,
         config: dict,
         sorted_tissues: list[str],
+        target_normalizer: TargetNormalizer | None = None,
     ) -> None:
         """Initialize the dataset with pre-loaded data and vocabulary.
 
@@ -37,12 +39,33 @@ class ExpressionDataset(Dataset):
             vocabulary: Token vocabulary built from the dataset tissues.
             config: Hyperparameter dict (uses ``max_seq_len``).
             sorted_tissues: Alphabetically sorted tissue names for encoding.
+            target_normalizer: Optional fitted scaler for regression targets.
         """
         self._df = dataframe.reset_index(drop=True)
         self._vocabulary = vocabulary
         self._config = config
         self._sorted_tissues = sorted_tissues
         self._max_seq_len = config["max_seq_len"]
+        self._target_normalizer = target_normalizer
+
+    def attach_target_normalizer(self, normalizer: TargetNormalizer) -> None:
+        """Attach a train-fitted normalizer for target transformation.
+
+        Args:
+            normalizer: Fitted ``TargetNormalizer`` using training-split stats.
+        """
+        self._target_normalizer = normalizer
+
+    def get_raw_target(self, index: int) -> float:
+        """Return the unnormalized VST expression for a dataset row.
+
+        Args:
+            index: Row index into the underlying DataFrame.
+
+        Returns:
+            Raw ``vst_expression`` value before normalization.
+        """
+        return float(self._df.iloc[index]["vst_expression"])
 
     def __len__(self) -> int:
         return len(self._df)
@@ -79,7 +102,11 @@ class ExpressionDataset(Dataset):
                 f"max_seq_len {self._max_seq_len}"
             )
 
-        target = torch.tensor(float(row["vst_expression"]), dtype=torch.float32)
+        raw_target = float(row["vst_expression"])
+        if self._target_normalizer is not None:
+            # Normalized target (min-max + z-score) when normalizer attached
+            raw_target = float(self._target_normalizer.transform(raw_target))
+        target = torch.tensor(raw_target, dtype=torch.float32)
         tokens = torch.tensor(token_ids, dtype=torch.long)
         return tokens, target
 
