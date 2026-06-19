@@ -135,7 +135,8 @@ def run_training_epoch(
 
     Args:
         model: Expression Transformer model.
-        train_loader: Training DataLoader yielding (sequences, mask, targets).
+        train_loader: Training DataLoader yielding
+            (tissue_ids, dna_tokens, dna_mask, targets).
         optimizer: Optimizer instance (AdamW).
         criterion: Loss function (MSELoss).
         device: Target device string.
@@ -152,12 +153,15 @@ def run_training_epoch(
 
     optimizer.zero_grad()
 
-    for batch_idx, (sequences, mask, targets) in enumerate(train_loader):
-        sequences = sequences.to(device)
-        mask = mask.to(device)
+    for batch_idx, (tissue_ids, dna_tokens, dna_mask, targets) in enumerate(
+        train_loader
+    ):
+        tissue_ids = tissue_ids.to(device)
+        dna_tokens = dna_tokens.to(device)
+        dna_mask = dna_mask.to(device)
         targets = targets.to(device)
 
-        predictions = model(sequences, mask)
+        predictions = model(tissue_ids, dna_tokens, dna_mask)
         loss = criterion(predictions, targets)
         scaled_loss = loss / accum_steps
         scaled_loss.backward()
@@ -184,7 +188,8 @@ def run_validation_epoch(
 
     Args:
         model: Expression Transformer model.
-        val_loader: Validation DataLoader yielding (sequences, mask, targets).
+        val_loader: Validation DataLoader yielding
+            (tissue_ids, dna_tokens, dna_mask, targets).
         device: Target device string.
 
     Returns:
@@ -195,12 +200,13 @@ def run_validation_epoch(
     num_samples = 0
 
     with torch.no_grad():
-        for sequences, mask, targets in val_loader:
-            sequences = sequences.to(device)
-            mask = mask.to(device)
+        for tissue_ids, dna_tokens, dna_mask, targets in val_loader:
+            tissue_ids = tissue_ids.to(device)
+            dna_tokens = dna_tokens.to(device)
+            dna_mask = dna_mask.to(device)
             targets = targets.to(device)
 
-            predictions = model(sequences, mask)
+            predictions = model(tissue_ids, dna_tokens, dna_mask)
             total_squared_error += torch.sum((predictions - targets) ** 2).item()
             num_samples += targets.numel()
 

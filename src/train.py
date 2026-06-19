@@ -22,13 +22,17 @@ CONFIG = {
     "vocab_pad": "[PAD]",
     "vocab_unk": "N",
     "nucleotides": ["A", "C", "T", "G"],
-    "max_seq_len": 1500,
+    "max_seq_len": 1800,  # DNA-only maximum; tissue is prepended in the model
     # Model params
     "d_model": 128,
     "n_heads": 4,
     "n_layers": 4,
     "d_mlp": 512,
     "dropout": 0.2,
+    "cnn_kernel_size": 9,
+    "cnn_stride": 1,
+    "cnn_padding": 4,
+    "cnn_max_pool_size": 4,
     # Training params
     "batch_size": 32,
     "gradient_accumulation_steps": 8,
