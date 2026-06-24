@@ -231,3 +231,5 @@ data/sanitized_genome
 data/launch
 .cursorignore
 launch_gpu.sh
+
+data/dmel_integrated_data.tsv
