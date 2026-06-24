@@ -220,3 +220,14 @@ __marimo__/
 # Macos files
 .DS_Store
 **/.DS_Store
+
+data/raw_count_files
+data/genome
+data/w1118_filtered.tsv
+data/w1118_scaled.tsv
+specs
+training_data
+data/sanitized_genome
+data/launch
+.cursorignore
+launch_gpu.sh
