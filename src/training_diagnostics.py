@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence
+from dataset import collate_expression_batch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from callbacks import BestCheckpointEarlyStopping
@@ -28,6 +28,7 @@ from diagnostics import (
     display_group_name,
     format_group_metrics,
 )
+from training import get_lr_for_epoch, set_optimizer_lr
 from target_normalization import TargetNormalizer
 
 
@@ -92,22 +93,39 @@ class DiagnosticSubset(Dataset):
 
     def __getitem__(
         self, subset_index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, int, str, str]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        str,
+        str]:
         original_index = self.indices[subset_index]
-        tokens, target = self.base_dataset[original_index]
+        tissue_id, dna_tokens, target = self.base_dataset[original_index]
+
         return (
-            tokens,
+            tissue_id,
+            dna_tokens,
             target,
             original_index,
             self.group_labels[original_index],
-            self.tissues[original_index],
-        )
+            self.tissues[original_index])
 
 
 def collate_diagnostic_batch(
-    batch: list[tuple[torch.Tensor, torch.Tensor, int, str, str]],
+    batch: list[
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            int,
+            str,
+            str,
+        ]
+    ],
     pad_id: int,
 ) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -115,20 +133,22 @@ def collate_diagnostic_batch(
     list[str],
     list[str],
 ]:
-    """Dynamically pad a batch while retaining diagnostic metadata."""
+    tissue_ids, dna_tokens, targets, indices, groups, tissues = zip(*batch)
 
-    tokens, targets, indices, groups, tissues = zip(*batch)
-    padded = pad_sequence(tokens, batch_first=True, padding_value=pad_id)
-    key_padding_mask = padded.eq(pad_id)
+    model_batch = list(zip(tissue_ids, dna_tokens, targets))
+    tissue_batch, dna_batch, dna_mask, target_batch = (
+        collate_expression_batch(model_batch, pad_id)
+    )
+
     return (
-        padded,
-        key_padding_mask,
-        torch.stack(targets, dim=0),
+        tissue_batch,
+        dna_batch,
+        dna_mask,
+        target_batch,
         torch.tensor(indices, dtype=torch.long),
         list(groups),
         list(tissues),
     )
-
 
 def set_global_seed(seed: int) -> None:
     """Seed Python, NumPy, and PyTorch for comparable experiments."""
@@ -300,6 +320,7 @@ def run_training_epoch(
     criterion: nn.Module,
     device: str,
     max_grad_norm: float | None,
+    gradient_accumulation_steps: int,
 ) -> TrainingEpochResult:
     """Train for one epoch and report sampled groups and gradient norms."""
 
@@ -312,24 +333,60 @@ def run_training_epoch(
     unique_by_group: dict[str, set[int]] = defaultdict(set)
     unique_records: set[int] = set()
 
-    for sequences, mask, targets, indices, groups, _ in train_loader:
-        sequences = sequences.to(device)
-        mask = mask.to(device)
+    accum_steps = int(gradient_accumulation_steps)
+    if accum_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1")
+
+    num_batches = len(train_loader)
+    optimizer.zero_grad(set_to_none=True)
+
+    for batch_idx, batch in enumerate(train_loader):
+        (
+            tissue_ids,
+            dna_tokens,
+            dna_mask,
+            targets,
+            indices,
+            groups,
+            _,
+        ) = batch
+
+        tissue_ids = tissue_ids.to(device)
+        dna_tokens = dna_tokens.to(device)
+        dna_mask = dna_mask.to(device)
         targets = targets.to(device)
 
-        optimizer.zero_grad(set_to_none=True)
-        predictions = model(sequences, mask)
+        predictions = model(tissue_ids, dna_tokens, dna_mask)
         loss = criterion(predictions, targets)
-        if not torch.isfinite(loss):
-            raise RuntimeError(f"Non-finite training loss encountered: {loss}")
 
-        loss.backward()
-        if max_grad_norm is not None and max_grad_norm > 0:
-            gradient_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=max_grad_norm
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                f"Non-finite training loss encountered: {loss.item()}"
             )
-            gradient_norms.append(float(gradient_norm.detach().cpu()))
-        optimizer.step()
+
+        # Scale the loss so the accumulated gradient corresponds to
+        # the average loss over the effective batch.
+        (loss / accum_steps).backward()
+
+        is_accumulation_step = (
+            (batch_idx + 1) % accum_steps == 0
+        )
+        is_last_batch = (
+            (batch_idx + 1) == num_batches
+        )
+
+        if is_accumulation_step or is_last_batch:
+            if max_grad_norm is not None and max_grad_norm > 0:
+                gradient_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=max_grad_norm,
+                )
+                gradient_norms.append(
+                    float(gradient_norm.detach().cpu())
+                )
+
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         errors = predictions.detach() - targets
         total_squared_error += torch.sum(errors**2).item()
@@ -378,11 +435,12 @@ def run_validation_epoch(
     tissues: list[str] = []
 
     with torch.no_grad():
-        for sequences, mask, targets, _, batch_groups, batch_tissues in val_loader:
-            sequences = sequences.to(device)
-            mask = mask.to(device)
+        for (tissue_ids, dna_tokens, dna_mask, targets, _, batch_groups, batch_tissues, ) in val_loader:
+            tissue_ids = tissue_ids.to(device)
+            dna_tokens = dna_tokens.to(device)
+            dna_mask = dna_mask.to(device)
             targets = targets.to(device)
-            predictions = model(sequences, mask)
+            predictions = model(tissue_ids, dna_tokens, dna_mask)
 
             prediction_batches.append(predictions.detach().cpu())
             target_batches.append(targets.detach().cpu())
@@ -456,16 +514,20 @@ def train_model_with_diagnostics(
     max_grad_norm: float = 1.0,
 ) -> list[dict[str, float]]:
     """Train with clipping, checkpoints, early stopping, and diagnostics."""
-
+    accum_steps = int(config["gradient_accumulation_steps"])
+    if accum_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1")
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(config["lr"]),
+        lr=float(config["start_lr"]),
         weight_decay=float(config.get("weight_decay", 0.01)),
     )
     criterion = nn.MSELoss()
     history: list[dict[str, float]] = []
 
     for epoch in range(1, int(config["epochs"]) + 1):
+        current_lr = get_lr_for_epoch(epoch, config)
+        set_optimizer_lr(optimizer, current_lr)
         train_result = run_training_epoch(
             model=model,
             train_loader=data.train_loader,
@@ -473,6 +535,7 @@ def train_model_with_diagnostics(
             criterion=criterion,
             device=device,
             max_grad_norm=max_grad_norm,
+            gradient_accumulation_steps=accum_steps,
         )
         validation = run_validation_epoch(
             model=model,
@@ -506,6 +569,7 @@ def train_model_with_diagnostics(
             f"train MSE(norm)={train_result.mse_normalized:.6f} | "
             f"val MSE(norm)={validation.normalized_metrics.mse:.6f} | "
             f"val MSE(raw)={validation.raw_metrics.mse:.6f} | "
+            f"LR={current_lr:.2e} | "
             f"delta vs tissue-only={delta_vs_tissue:+.6f}{saved}"
         )
         print(

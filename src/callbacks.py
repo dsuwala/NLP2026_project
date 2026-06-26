@@ -31,17 +31,26 @@ class BestCheckpointEarlyStopping:
         checkpoint_path: str,
         patience: int = 10,
         min_delta: float = 0.0,
+        start_epoch: int = 1,
     ) -> None:
         if patience < 1:
             raise ValueError("patience must be at least 1.")
         if min_delta < 0:
             raise ValueError("min_delta must be non-negative.")
+        if start_epoch < 1:
+            raise ValueError("start_epoch must be at least 1.")
 
         self.checkpoint_path = Path(checkpoint_path)
         self.patience = patience
         self.min_delta = min_delta
+        self.start_epoch = start_epoch
+
+        # Global best, used for checkpointing.
         self.best_value = float("inf")
         self.best_epoch: int | None = None
+
+        # Separate state used only for delayed early stopping.
+        self.early_stopping_best_value = float("inf")
         self.epochs_without_improvement = 0
 
     def _save(
@@ -94,11 +103,18 @@ class BestCheckpointEarlyStopping:
                 config=config,
                 extra_state=extra_state,
             )
+        if epoch < self.start_epoch:
+            self.epochs_without_improvement = 0
+            should_stop = False
         else:
-            self.epochs_without_improvement += 1
+            early_stopping_improved = (monitored_value < self.early_stopping_best_value - self.min_delta)
 
-        return CallbackResult(
-            improved=improved,
-            should_stop=self.epochs_without_improvement >= self.patience,
-            epochs_without_improvement=self.epochs_without_improvement,
-        )
+            if early_stopping_improved:
+                self.early_stopping_best_value = float(monitored_value)
+                self.epochs_without_improvement = 0
+            else:
+                self.epochs_without_improvement += 1
+
+            should_stop = (self.epochs_without_improvement >= self.patience)
+
+        return CallbackResult(improved=improved, should_stop=should_stop, epochs_without_improvement=self.epochs_without_improvement)

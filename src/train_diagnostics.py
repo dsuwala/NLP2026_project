@@ -107,8 +107,26 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--start-lr", type=float, default=None)
+    parser.add_argument("--max-lr", type=float, default=None)
+    parser.add_argument("--warmup-period", type=int, default=None)
+    parser.add_argument( "--gradient-accumulation-steps", type=int, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="Maximum DNA length before CNN processing.",
+    )
+    parser.add_argument(
+        "--cnn-max-pool-size",
+        type=int,
+        default=None,
+        help="MaxPool1d kernel and stride; 1 disables length reduction.",
+    )
+    parser.add_argument("--early-stopping-start-epoch", type=int, default=80, help=(
+        "Start counting early-stopping patience from this epoch. "
+        "Best-checkpoint tracking remains active from epoch 1."))
     parser.add_argument(
         "--device",
         default=None,
@@ -123,11 +141,26 @@ def _build_config(args: argparse.Namespace) -> dict:
         config["epochs"] = args.epochs
     if args.batch_size is not None:
         config["batch_size"] = args.batch_size
-    if args.lr is not None:
-        config["lr"] = args.lr
     if args.device is not None:
         config["device"] = args.device
-    config["weight_decay"] = args.weight_decay
+    if args.weight_decay is not None:
+        config["weight_decay"] = args.weight_decay
+    if args.max_seq_len is not None:
+        if args.max_seq_len < 1:
+            raise ValueError("--max-seq-len must be >= 1.")
+        config["max_seq_len"] = args.max_seq_len
+    if args.cnn_max_pool_size is not None:
+        if args.cnn_max_pool_size < 1:
+            raise ValueError("--cnn-max-pool-size must be >= 1.")
+        config["cnn_max_pool_size"] = args.cnn_max_pool_size
+    if args.start_lr is not None:
+        config["start_lr"] = args.start_lr
+    if args.max_lr is not None:
+        config["max_lr"] = args.max_lr
+    if args.warmup_period is not None:
+        config["warmup_period"] = args.warmup_period
+    if args.gradient_accumulation_steps is not None:
+        config["gradient_accumulation_steps"] = (args.gradient_accumulation_steps)
     return config
 
 
@@ -250,6 +283,14 @@ def main() -> None:
             f"motif={args.motif!r}"
         )
         print(f"Seed: {args.seed}")
+        print(f"Maximum DNA length: {config['max_seq_len']}")
+        print(
+            "CNN configuration: "
+            f"kernel={config['cnn_kernel_size']}, "
+            f"stride={config['cnn_stride']}, "
+            f"padding={config['cnn_padding']}, "
+            f"max_pool_size={config['cnn_max_pool_size']}"
+        )
         if args.balanced_sampler:
             draws = args.samples_per_epoch or len(data.train_indices)
             present_groups = len(
@@ -287,8 +328,7 @@ def main() -> None:
             checkpoint_path=args.checkpoint_file,
             patience=args.patience,
             min_delta=args.min_delta,
-        )
-
+            start_epoch=args.early_stopping_start_epoch)
         train_model_with_diagnostics(
             model=model,
             data=data,
