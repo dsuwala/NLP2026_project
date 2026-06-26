@@ -22,6 +22,10 @@ CONFIG = {
     "vocab_pad": "[PAD]",
     "vocab_unk": "N",
     "nucleotides": ["A", "C", "T", "G"],
+    # DNABERT-like overlapping k-mers; embeddings are trained from scratch
+    "tokenization": "kmer",
+    "kmer_size": 6,
+    "kmer_stride": 1,
     "max_seq_len": 1500,
     # Model params
     "d_model": 128,

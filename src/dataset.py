@@ -14,9 +14,12 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from target_normalization import TargetNormalizer
-from vocabulary import Vocabulary, encode_dna_sequence, encode_tissue
-
-
+from vocabulary import (
+    Vocabulary,
+    encode_dna_sequence,
+    encode_tissue,
+    max_raw_dna_length,
+)
 class ExpressionDataset(Dataset):
     """Map a tissue and promoter/5' UTR sequence to an expression target.
 
@@ -37,6 +40,9 @@ class ExpressionDataset(Dataset):
         self._config = config
         self._sorted_tissues = list(sorted_tissues)
         self._max_seq_len = int(config["max_seq_len"])
+        self._max_visible_dna_len = max_raw_dna_length(
+            self._max_seq_len - 1, self._config
+        )
         self._target_normalizer = target_normalizer
 
         if self._max_seq_len < 2:
@@ -53,9 +59,9 @@ class ExpressionDataset(Dataset):
 
     @property
     def max_visible_dna_len(self) -> int:
-        """Maximum number of DNA characters visible to the model."""
+        """Maximum number of raw DNA characters visible to the model."""
 
-        return self._max_seq_len - 1
+        return self._max_visible_dna_len
 
     def attach_target_normalizer(self, normalizer: TargetNormalizer) -> None:
         """Attach a normalizer fitted only on the training split."""

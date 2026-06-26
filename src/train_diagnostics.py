@@ -261,8 +261,7 @@ def _print_data_diagnostics(
 
     print(
         "Input window: "
-        f"max total tokens={data.max_visible_dna_len + 1}, "
-        f"max visible DNA={data.max_visible_dna_len}"
+        f"max visible raw DNA={data.max_visible_dna_len} nt"
     )
     truncated_share = (
         100.0 * data.truncated_record_count / total_samples
@@ -398,6 +397,13 @@ def main() -> None:
 
         print(f"Device: {device}")
         print(f"Samples: {len(dataset)}")
+        print(f"Tokenization: {config.get('tokenization', 'nucleotide')}")
+        if config.get("tokenization", "nucleotide") == "kmer":
+            print(
+                f"k-mer size / stride: {config['kmer_size']} / "
+                f"{config['kmer_stride']}"
+            )
+        print(f"Vocabulary size: {vocabulary.vocab_size}")
         print(
             f"Train / validation rows: {len(data.train_indices)} / "
             f"{len(data.val_indices)}"
