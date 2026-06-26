@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""
-PyTorch Dataset and batch collation for genomic expression regression.
+"""Dataset and collation for the no-CNN genomic Transformer.
 
-Assembles promoter + 5' UTR sequences, prepends a tissue token, and provides
-dynamic padding with attention masks for variable-length batches.
+The tissue token is prepended to the nucleotide sequence inside the dataset.
+``max_seq_len`` therefore denotes the total Transformer input length, including
+one tissue token. DNA exceeding ``max_seq_len - 1`` is truncated deterministically
+from the right.
 """
-
 from __future__ import annotations
 
 import pandas as pd
@@ -18,10 +18,10 @@ from vocabulary import Vocabulary, encode_dna_sequence, encode_tissue
 
 
 class ExpressionDataset(Dataset):
-    """Dataset mapping (tissue + DNA sequence) pairs to VST expression targets.
+    """Map a tissue and promoter/5' UTR sequence to an expression target.
 
-    Each sample returns a 1-D token tensor with the tissue token prepended at
-    index 0, plus a scalar regression target.
+    Each sample returns ``(tokens, target)``. ``tokens[0]`` is the tissue token;
+    the remaining positions contain promoter followed by 5' UTR nucleotides.
     """
 
     def __init__(
@@ -32,107 +32,114 @@ class ExpressionDataset(Dataset):
         sorted_tissues: list[str],
         target_normalizer: TargetNormalizer | None = None,
     ) -> None:
-        """Initialize the dataset with pre-loaded data and vocabulary.
-
-        Args:
-            dataframe: Expression DataFrame with tissue, sequence, and target columns.
-            vocabulary: Token vocabulary built from the dataset tissues.
-            config: Hyperparameter dict (uses ``max_seq_len``).
-            sorted_tissues: Alphabetically sorted tissue names for encoding.
-            target_normalizer: Optional fitted scaler for regression targets.
-        """
         self._df = dataframe.reset_index(drop=True)
         self._vocabulary = vocabulary
         self._config = config
-        self._sorted_tissues = sorted_tissues
-        self._max_seq_len = config["max_seq_len"]
+        self._sorted_tissues = list(sorted_tissues)
+        self._max_seq_len = int(config["max_seq_len"])
         self._target_normalizer = target_normalizer
 
-    def attach_target_normalizer(self, normalizer: TargetNormalizer) -> None:
-        """Attach a train-fitted normalizer for target transformation.
+        if self._max_seq_len < 2:
+            raise ValueError(
+                "max_seq_len must be at least 2: one tissue token and at "
+                "least one DNA token."
+            )
 
-        Args:
-            normalizer: Fitted ``TargetNormalizer`` using training-split stats.
-        """
+    @property
+    def max_seq_len(self) -> int:
+        """Maximum total token count, including the tissue token."""
+
+        return self._max_seq_len
+
+    @property
+    def max_visible_dna_len(self) -> int:
+        """Maximum number of DNA characters visible to the model."""
+
+        return self._max_seq_len - 1
+
+    def attach_target_normalizer(self, normalizer: TargetNormalizer) -> None:
+        """Attach a normalizer fitted only on the training split."""
+
         self._target_normalizer = normalizer
 
     def get_raw_target(self, index: int) -> float:
-        """Return the unnormalized VST expression for a dataset row.
+        """Return the unnormalized VST expression value for one row."""
 
-        Args:
-            index: Row index into the underlying DataFrame.
-
-        Returns:
-            Raw ``vst_expression`` value before normalization.
-        """
         return float(self._df.iloc[index]["vst_expression"])
+
+    def get_full_dna_sequence(self, index: int) -> str:
+        """Return promoter + 5' UTR before truncation, in uppercase."""
+
+        row = self._df.iloc[index]
+        promoter = str(row["promoter_sequence"])
+        utr = str(row["utr_5_sequence"])
+        return (promoter + utr).upper()
+
+    def get_visible_dna_sequence(self, index: int) -> str:
+        """Return exactly the DNA prefix that can be presented to the model."""
+
+        return self.get_full_dna_sequence(index)[: self.max_visible_dna_len]
+
+    def is_truncated(self, index: int) -> bool:
+        """Report whether the row's DNA exceeds the visible input window."""
+
+        return len(self.get_full_dna_sequence(index)) > self.max_visible_dna_len
 
     def __len__(self) -> int:
         return len(self._df)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Fetch one tokenized sample and its VST expression target.
+        """Return ``(tokens, target)`` for the no-CNN model interface.
 
-        Args:
-            index: Row index into the underlying DataFrame.
-
-        Returns:
-            Tuple of (token_ids, target) where token_ids has shape (L,) and
-            target is a scalar float tensor.
-
-        Raises:
-            ValueError: If the assembled token sequence exceeds ``max_seq_len``.
+        The returned sequence is always at most ``max_seq_len`` tokens long.
+        Truncation is applied to DNA only, preserving the tissue token at index 0.
         """
+
         row = self._df.iloc[index]
         tissue = str(row["tissue"])
-        promoter = str(row["promoter_sequence"])
-        utr = str(row["utr_5_sequence"])
+        visible_dna = self.get_visible_dna_sequence(index)
 
-        # Promoter + UTR_5 per spec
-        combined = promoter + utr
-        dna_ids = encode_dna_sequence(combined, self._vocabulary, self._config)
-        tissue_id = encode_tissue(tissue, self._vocabulary, self._sorted_tissues)
-
-        # Prepend tissue token at index 0
-        token_ids = [tissue_id] + dna_ids
-
-        if len(token_ids) > self._max_seq_len:
-            raise ValueError(
-                f"Sample {index} length {len(token_ids)} exceeds "
-                f"max_seq_len {self._max_seq_len}"
-            )
+        dna_ids = encode_dna_sequence(
+            visible_dna,
+            self._vocabulary,
+            self._config,
+        )
+        tissue_id = encode_tissue(
+            tissue,
+            self._vocabulary,
+            self._sorted_tissues,
+        )
+        token_ids = [tissue_id, *dna_ids]
 
         raw_target = float(row["vst_expression"])
         if self._target_normalizer is not None:
-            # Normalized target (min-max + z-score) when normalizer attached
             raw_target = float(self._target_normalizer.transform(raw_target))
-        target = torch.tensor(raw_target, dtype=torch.float32)
-        tokens = torch.tensor(token_ids, dtype=torch.long)
-        return tokens, target
+
+        return (
+            torch.tensor(token_ids, dtype=torch.long),
+            torch.tensor(raw_target, dtype=torch.float32),
+        )
 
 
 def collate_expression_batch(
-    batch: list[tuple[torch.Tensor, torch.Tensor]], pad_id: int
+    batch: list[tuple[torch.Tensor, torch.Tensor]],
+    pad_id: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Pad variable-length sequences and build an attention padding mask.
-
-    Args:
-        batch: List of (token_tensor, target_scalar) tuples from the Dataset.
-        pad_id: Integer ID of the padding token.
+    """Pad variable-length token sequences and build a padding mask.
 
     Returns:
-        Tuple of (sequences, key_padding_mask, targets) with shapes
-        (B, L_max), (B, L_max), and (B,) respectively.
+        ``(tokens, key_padding_mask, targets)`` where ``True`` in the mask marks
+        padding positions ignored by Transformer attention.
     """
-    sequences_list, targets_list = zip(*batch)
 
-    # Shape: (B, L_max)
-    padded = pad_sequence(sequences_list, batch_first=True, padding_value=pad_id)
+    if not batch:
+        raise ValueError("Cannot collate an empty batch.")
 
-    # Shape: (B,)
-    targets = torch.stack(targets_list, dim=0)
-
-    # True = ignore (padding); Shape: (B, L_max)
+    sequences, targets = zip(*batch)
+    padded = pad_sequence(
+        sequences,
+        batch_first=True,
+        padding_value=pad_id,
+    )
     key_padding_mask = padded.eq(pad_id)
-
-    return padded, key_padding_mask, targets
+    return padded, key_padding_mask, torch.stack(targets, dim=0)
